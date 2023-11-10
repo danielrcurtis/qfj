@@ -1,5 +1,5 @@
-# This code is for part 1.2 of the Quantitative Finance Journey Series by Daniel R Curtis
-# https://medium.com/@daniel.r.curtis/a-journey-in-quantitative-finance-eba36762688d
+# This code is for part 1.3 of the Quantitative Finance Journey Series by Daniel R Curtis
+# https://medium.com/@daniel.r.curtis/a-journey-in-quantitative-finance-df58cb88b159
 
 import numpy as np
 import tensorflow as tf
@@ -7,6 +7,7 @@ import platform
 import pandas as pd
 import os
 import logging
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 
 logging.basicConfig(level=logging.INFO) # Set the logging level to INFO
 logger = logging.getLogger(__name__) # Get the logger for this file
@@ -172,36 +173,102 @@ def split_dataset(dataset, train_size_ratio=0.8):
 
     return train_dataset, val_dataset
 
-def build_lstm_model(dataset, lstm_units):
+def build_lstm_model(dataset, lstm_units, lstm_activation='relu', lstm_kernel_initializer='glorot_uniform', loss='mse', optimizer='nadam', metrics=['mae'], return_sequences=False):
     """
-    Builds a simple LSTM model using TensorFlow Keras based on the LSTM unit size and dataset dimensions,
-    with linear activation functions.
+    Constructs an LSTM (Long Short-Term Memory) model using TensorFlow Keras. The model is composed of a single LSTM layer 
+    followed by a Dense output layer with linear activation. It is tailored for sequence prediction tasks, 
+    and the configuration of the LSTM layer and the compilation parameters can be customized.
 
     Args:
-        dataset (tf.data.Dataset): The TensorFlow dataset to get input and output dimensions.
-        lstm_units (int): The number of units in the LSTM layer.
+        dataset (tf.data.Dataset): The TensorFlow dataset that provides batches of input and target sequences.
+                                   The input to the LSTM layer is expected to be in the form of a 3D tensor 
+                                   with the shape (batch_size, time_steps, features).
+        lstm_units (int): The number of neurons in the LSTM layer. This defines the dimensionality of the 
+                          output space (i.e., the number of hidden states for each time step).
+        lstm_activation (str, optional): Activation function to use in the LSTM layer. Defaults to 'relu', 
+                                         which stands for rectified linear unit. Other common choices are
+                                            'tanh' (hyperbolic tangent) and 'sigmoid'.
+        lstm_kernel_initializer (str, optional): Initializer for the kernel weights matrix in the LSTM layer. 
+                                                 Defaults to 'glorot_uniform', also known as Xavier uniform initializer.
+        loss (str, optional): Loss function to be used during training. Defaults to 'mse' for mean squared error,
+                              which is commonly used for regression tasks.
+        optimizer (str, optional): Optimizer to use for training the model. Defaults to 'nadam', which is an 
+                                   Adam optimization algorithm with Nesterov momentum.
+        metrics (list, optional): List of metrics to be evaluated by the model during training and testing. 
+                                  Defaults to ['mae'] for mean absolute error, which is a common metric for 
+                                  regression tasks.
 
     Returns:
-        tf.keras.Model: A compiled Keras LSTM model.
+        tf.keras.Model: A compiled Keras model with an LSTM architecture, ready for training. The model has 
+                        been compiled with the specified loss function, optimizer, and evaluation metrics.
     """
-    # Determine the input shape from the dataset
+    # Determine the input shape for the LSTM layer from the first batch of the dataset
     for inputs, _ in dataset.take(1):
-        # The shape of inputs is expected to be (batch_size, time_steps, features)
-        # Ensure the input shape for LSTM layer is (time_steps, features)
-        input_shape = inputs.shape[1:]
+        input_shape = inputs.shape[1:]  # Input shape excluding the batch dimension
 
-    # Model definition
-    model = tf.keras.models.Sequential([
-        tf.keras.layers.LSTM(lstm_units, activation='linear', input_shape=input_shape, return_sequences=False),
-        tf.keras.layers.Dense(dataset.element_spec[1].shape[1], activation='linear')
-    ])
+    # Define the model layers dynamically based on return_sequences
+    layers = [
+        tf.keras.layers.LSTM(
+            lstm_units,
+            activation=lstm_activation,
+            kernel_initializer=lstm_kernel_initializer,
+            input_shape=input_shape,
+            return_sequences=return_sequences  # Controlled by the return_sequences argument
+        )
+    ]
+    
+    if return_sequences:
+        layers.append(tf.keras.layers.Flatten())  # Add Flatten layer if return_sequences is True
 
-    # Compile the model
-    model.compile(optimizer='nadam', loss='mse', metrics=['mae'])
+    layers.append(tf.keras.layers.Dense(
+        dataset.element_spec[1].shape[1],  # Number of neurons in the Dense layer matches the output dimension
+        activation='linear'  # Linear activation function in the output layer for regression tasks
+    ))
+
+    # Define the LSTM model architecture
+    model = tf.keras.models.Sequential(layers)
+
+    # Compile the model with the specified optimizer, loss function, and evaluation metrics
+    model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
+
+    # Assuming a logger is initialized elsewhere, or initialize it here
+    logger = logging.getLogger(__name__)
+    logger.info(f"Built LSTM model with {lstm_units} LSTM units, {lstm_activation} activation, {lstm_kernel_initializer} kernel initializer, {loss} loss, {optimizer} optimizer, and {metrics} metrics")
 
     return model
 
+def scale_dataset(data, scaler_type='standard'):
+    """
+    Scales the dataset based on the specified scaler type and returns the scaler object along with the scaled data.
+
+    Args:
+        data (np.array): The input data to scale.
+        scaler_type (str): The type of scaler to use. Should be one of 'robust', 'standard', 'minmax'.
+
+    Returns:
+        tuple: A tuple containing the scaled dataset and the scaler object used for scaling.
+    """
+    if scaler_type == 'robust':
+        scaler = RobustScaler()
+    elif scaler_type == 'minmax':
+        scaler = MinMaxScaler()
+    elif scaler_type == 'standard':
+        scaler = StandardScaler()
+    else:
+        raise ValueError(f"Scaler type '{scaler_type}' not recognized. Choose 'robust', 'minmax', or 'standard'.")
+
+    # Fit the scaler on the data and then transform the data
+    scaled_data = scaler.fit_transform(data)
+
+    return scaled_data, scaler
+
 def main():
+    # Set the scaler type to use: 'robust', 'minmax', or 'standard'
+    scaler_type = 'minmax' # Set this to scaler_type = None to disable scaling
+
+    # Select the columns to be used for training our model
+    selected_columns = ['close']
+
     # Read the data from the CSV file - the filename is hardcoded here based
     # on the example Binance information above. We also assume that you have
     # unzipped the downloaded file into the same path as it was downloaded.
@@ -211,19 +278,47 @@ def main():
     print_dataframe_info(btc_data)
 
     # Select the columns to be used for training our model
-    selected_data = select_df_columns(df=btc_data, columns=['close'])
+    selected_data = select_df_columns(df=btc_data, columns=selected_columns)
 
-    # Create a time series dataset
-    dataset = create_time_series_dataset(df=selected_data, input_sequence_length=3, prediction_timesteps=1,
+    # Scale the data using the specified scaler type
+    if scaler_type is not None:
+        selected_data, scaler = scale_dataset(data=selected_data, scaler_type=scaler_type)
+
+        # Create a DataFrame from the scaled data since the scaler returns a numpy array
+        selected_data = pd.DataFrame(selected_data, columns=selected_columns)
+
+        # Log details about the scaled data
+        logger.info(f"Scaled data using {scaler_type} scaler.")
+        if scaler_type == 'standard':
+            logger.info(f"Scaler mean: {scaler.mean_}, Scaler variance: {scaler.var_}")
+        elif scaler_type == 'minmax':
+            logger.info(f"Scaler data min: {scaler.data_min_}, Scaler data max: {scaler.data_max_}")
+        elif scaler_type == 'robust':
+            logger.info(f"Scaler center: {scaler.center_}, Scaler scale: {scaler.scale_}")
+
+    # Create a time series dataset. Consider changing the input_sequence_length and prediction_timesteps to see how the model performs.
+    dataset = create_time_series_dataset(df=selected_data, input_sequence_length=11, prediction_timesteps=1,
                                           prediction_columns=['close'], check_dataset_stats=True, shuffle=True, stride=1)
-    # Print the dataset shapes
+    
+    # Print the dataset shapes and scaler information.
     print_dataset_shapes(dataset)
 
-    # Split the dataset into training and validation sets
+    logger.info(f"Scaling method: {scaler_type}")
+
+    # Split the dataset into training and validation sets.
     train_dataset, val_dataset = split_dataset(dataset=dataset, train_size_ratio=0.8)
 
-    # Build the LSTM model and print the summary
-    lstm_model = build_lstm_model(dataset=train_dataset, lstm_units=3)
+    # Build the LSTM model and print the summary. Note that we have changed the number of LSTM units from 3 to 6 and the activation function from 'relu' to 'tanh'.
+    # We have also change the loss function from 'mse' to 'mae' and enabled the return_sequences argument.
+    # Have fun experimenting with different values!
+    # lstm_activation options: 'relu', 'tanh', 'sigmoid'
+    # loss options: 'mse', 'mae'
+    # optimizer options: 'nadam', 'adam', 'sgd'
+    # metrics options: 'mae', 'mse'
+    # return_sequences options: True, False
+    # lstm_kernel_initializer options: 'glorot_uniform', 'glorot_normal', 'he_uniform', 'he_normal'
+    lstm_model = build_lstm_model(dataset=train_dataset, lstm_units=22, lstm_activation='tanh', lstm_kernel_initializer='glorot_uniform',
+                                   loss='mae', optimizer='nadam', metrics=['mse'], return_sequences=False)
     lstm_model.summary()
 
     # Train the model
